@@ -1,170 +1,182 @@
 package com.redbookclone.app.data.repository
 
+import android.content.Context
+import android.net.Uri
 import com.redbookclone.app.data.local.NoteDao
-import com.redbookclone.app.data.local.UserPreferences
 import com.redbookclone.app.data.model.Note
+import com.redbookclone.app.data.remote.ApiService
+import com.redbookclone.app.data.remote.toNote
+import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.first
-import java.util.UUID
+import kotlinx.coroutines.flow.flow
+import okhttp3.MediaType.Companion.toMediaTypeOrNull
+import okhttp3.MultipartBody
+import okhttp3.RequestBody.Companion.asRequestBody
+import okhttp3.RequestBody.Companion.toRequestBody
+import java.io.File
 import javax.inject.Inject
 import javax.inject.Singleton
 
 @Singleton
 class NoteRepository @Inject constructor(
+    private val apiService: ApiService,
     private val noteDao: NoteDao,
-    private val userPreferences: UserPreferences
+    @ApplicationContext private val context: Context
 ) {
     
-    fun getAllNotes(): Flow<List<Note>> = noteDao.getAllNotes()
+    fun getAllNotes(): Flow<List<Note>> = flow {
+        try {
+            val response = apiService.getAllNotes()
+            if (response.isSuccessful && response.body()?.success == true) {
+                val notes = response.body()!!.data!!.notes.map { it.toNote() }
+                noteDao.deleteAllNotes()
+                noteDao.insertNotes(notes)
+                emit(notes)
+            } else {
+                emit(noteDao.getAllNotes().kotlinx.coroutines.flow.first())
+            }
+        } catch (e: Exception) {
+            emit(noteDao.getAllNotes().kotlinx.coroutines.flow.first())
+        }
+    }
 
-    fun getNoteById(noteId: String): Flow<Note?> = noteDao.getNoteById(noteId)
+    fun getNoteById(noteId: String): Flow<Note?> = flow {
+        try {
+            val response = apiService.getNoteById(noteId)
+            if (response.isSuccessful && response.body()?.success == true) {
+                val note = response.body()!!.data!!.toNote()
+                noteDao.insertNote(note)
+                emit(note)
+            } else {
+                emit(noteDao.getNoteById(noteId).kotlinx.coroutines.flow.first())
+            }
+        } catch (e: Exception) {
+            emit(noteDao.getNoteById(noteId).kotlinx.coroutines.flow.first())
+        }
+    }
 
-    fun getNotesByUserId(userId: String): Flow<List<Note>> = noteDao.getNotesByUserId(userId)
+    fun getNotesByUserId(userId: String): Flow<List<Note>> = flow {
+        try {
+            val response = apiService.getUserNotes(userId)
+            if (response.isSuccessful && response.body()?.success == true) {
+                val notes = response.body()!!.data!!.map { it.toNote() }
+                emit(notes)
+            } else {
+                emit(noteDao.getNotesByUserId(userId).kotlinx.coroutines.flow.first())
+            }
+        } catch (e: Exception) {
+            emit(noteDao.getNotesByUserId(userId).kotlinx.coroutines.flow.first())
+        }
+    }
 
     suspend fun createNote(
         title: String,
         content: String,
-        images: List<String>,
+        imageUris: List<Uri>,
         location: String = "",
         topics: List<String> = emptyList()
     ): Result<Note> {
         return try {
-            val userId = userPreferences.userId.first() ?: throw IllegalStateException("用户未登录")
-            val username = userPreferences.username.first() ?: "未知用户"
-            
-            val note = Note(
-                id = UUID.randomUUID().toString(),
-                userId = userId,
-                username = username,
-                userAvatar = "https://picsum.photos/200?random=$userId",
-                title = title,
-                content = content,
-                images = images,
-                coverImage = images.firstOrNull() ?: "",
-                location = location,
-                topics = topics
+            val titleBody = title.toRequestBody("text/plain".toMediaTypeOrNull())
+            val contentBody = content.toRequestBody("text/plain".toMediaTypeOrNull())
+            val locationBody = if (location.isNotEmpty()) {
+                location.toRequestBody("text/plain".toMediaTypeOrNull())
+            } else null
+            val topicsBody = if (topics.isNotEmpty()) {
+                com.google.gson.Gson().toJson(topics).toRequestBody("application/json".toMediaTypeOrNull())
+            } else null
+
+            val imageParts = imageUris.mapIndexed { index, uri ->
+                val file = createTempFileFromUri(uri)
+                val requestFile = file.asRequestBody("image/*".toMediaTypeOrNull())
+                MultipartBody.Part.createFormData("images", file.name, requestFile)
+            }
+
+            val response = apiService.createNote(
+                title = titleBody,
+                content = contentBody,
+                location = locationBody,
+                topics = topicsBody,
+                images = imageParts
             )
-            
-            noteDao.insertNote(note)
-            Result.success(note)
+
+            if (response.isSuccessful && response.body()?.success == true) {
+                val note = response.body()!!.data!!.toNote()
+                noteDao.insertNote(note)
+                Result.success(note)
+            } else {
+                Result.failure(Exception(response.body()?.message ?: "发布失败"))
+            }
         } catch (e: Exception) {
             Result.failure(e)
         }
     }
 
     suspend fun likeNote(noteId: String) {
-        val note = noteDao.getNoteById(noteId).first() ?: return
-        val updatedNote = note.copy(
-            isLiked = !note.isLiked,
-            likesCount = if (note.isLiked) note.likesCount - 1 else note.likesCount + 1
-        )
-        noteDao.updateNote(updatedNote)
+        try {
+            val response = apiService.toggleLike(noteId)
+            if (response.isSuccessful) {
+                val note = noteDao.getNoteById(noteId).kotlinx.coroutines.flow.first() ?: return
+                val isLiked = response.body()?.data?.isLiked ?: !note.isLiked
+                val updatedNote = note.copy(
+                    isLiked = isLiked,
+                    likesCount = if (isLiked) note.likesCount + 1 else note.likesCount - 1
+                )
+                noteDao.updateNote(updatedNote)
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
     }
 
     suspend fun collectNote(noteId: String) {
-        val note = noteDao.getNoteById(noteId).first() ?: return
-        val updatedNote = note.copy(
-            isCollected = !note.isCollected,
-            collectsCount = if (note.isCollected) note.collectsCount - 1 else note.collectsCount + 1
-        )
-        noteDao.updateNote(updatedNote)
+        try {
+            val response = apiService.toggleCollect(noteId)
+            if (response.isSuccessful) {
+                val note = noteDao.getNoteById(noteId).kotlinx.coroutines.flow.first() ?: return
+                val isCollected = response.body()?.data?.isCollected ?: !note.isCollected
+                val updatedNote = note.copy(
+                    isCollected = isCollected,
+                    collectsCount = if (isCollected) note.collectsCount + 1 else note.collectsCount - 1
+                )
+                noteDao.updateNote(updatedNote)
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
     }
 
     suspend fun deleteNote(noteId: String) {
-        noteDao.deleteNote(noteId)
+        try {
+            val response = apiService.deleteNote(noteId)
+            if (response.isSuccessful) {
+                noteDao.deleteNote(noteId)
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
     }
 
-    suspend fun initializeMockData() {
-        // 创建一些模拟数据
-        val mockNotes = listOf(
-            Note(
-                id = UUID.randomUUID().toString(),
-                userId = "mock_user_1",
-                username = "小红薯1",
-                userAvatar = "https://picsum.photos/200?random=1",
-                title = "分享一个超美的旅行地",
-                content = "这个地方真的太美了！强烈推荐大家来打卡📸",
-                images = listOf(
-                    "https://picsum.photos/400/600?random=1",
-                    "https://picsum.photos/400/600?random=2"
-                ),
-                coverImage = "https://picsum.photos/400/600?random=1",
-                likesCount = 1234,
-                commentsCount = 56,
-                collectsCount = 789,
-                topics = listOf("旅行", "打卡"),
-                location = "丽江古城"
-            ),
-            Note(
-                id = UUID.randomUUID().toString(),
-                userId = "mock_user_2",
-                username = "美妆达人",
-                userAvatar = "https://picsum.photos/200?random=2",
-                title = "新手化妆教程",
-                content = "超详细的新手化妆步骤，手把手教你画出精致妆容✨",
-                images = listOf(
-                    "https://picsum.photos/400/600?random=3"
-                ),
-                coverImage = "https://picsum.photos/400/600?random=3",
-                likesCount = 2345,
-                commentsCount = 123,
-                collectsCount = 1234,
-                topics = listOf("美妆", "教程")
-            ),
-            Note(
-                id = UUID.randomUUID().toString(),
-                userId = "mock_user_3",
-                username = "美食探店",
-                userAvatar = "https://picsum.photos/200?random=3",
-                title = "探店｜这家餐厅太好吃了",
-                content = "今天去了一家超好吃的餐厅，环境也特别棒！强烈推荐🍜",
-                images = listOf(
-                    "https://picsum.photos/400/600?random=4",
-                    "https://picsum.photos/400/600?random=5",
-                    "https://picsum.photos/400/600?random=6"
-                ),
-                coverImage = "https://picsum.photos/400/600?random=4",
-                likesCount = 3456,
-                commentsCount = 234,
-                collectsCount = 2345,
-                topics = listOf("美食", "探店"),
-                location = "上海"
-            ),
-            Note(
-                id = UUID.randomUUID().toString(),
-                userId = "mock_user_4",
-                username = "穿搭博主",
-                userAvatar = "https://picsum.photos/200?random=4",
-                title = "秋冬穿搭分享",
-                content = "分享几套秋冬穿搭，简单又时尚👗",
-                images = listOf(
-                    "https://picsum.photos/400/600?random=7"
-                ),
-                coverImage = "https://picsum.photos/400/600?random=7",
-                likesCount = 4567,
-                commentsCount = 345,
-                collectsCount = 3456,
-                topics = listOf("穿搭", "时尚")
-            ),
-            Note(
-                id = UUID.randomUUID().toString(),
-                userId = "mock_user_5",
-                username = "健身教练",
-                userAvatar = "https://picsum.photos/200?random=5",
-                title = "居家健身计划",
-                content = "不用去健身房也能练出好身材！分享我的居家健身计划💪",
-                images = listOf(
-                    "https://picsum.photos/400/600?random=8",
-                    "https://picsum.photos/400/600?random=9"
-                ),
-                coverImage = "https://picsum.photos/400/600?random=8",
-                likesCount = 5678,
-                commentsCount = 456,
-                collectsCount = 4567,
-                topics = listOf("健身", "运动")
-            )
-        )
-        
-        noteDao.insertNotes(mockNotes)
+    suspend fun searchNotes(query: String): Flow<List<Note>> = flow {
+        try {
+            val response = apiService.searchNotes(query)
+            if (response.isSuccessful && response.body()?.success == true) {
+                val notes = response.body()!!.data!!.map { it.toNote() }
+                emit(notes)
+            } else {
+                emit(emptyList())
+            }
+        } catch (e: Exception) {
+            emit(emptyList())
+        }
+    }
+
+    private fun createTempFileFromUri(uri: Uri): File {
+        val inputStream = context.contentResolver.openInputStream(uri)
+        val tempFile = File.createTempFile("upload", ".jpg", context.cacheDir)
+        tempFile.outputStream().use { outputStream ->
+            inputStream?.copyTo(outputStream)
+        }
+        return tempFile
     }
 }

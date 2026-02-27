@@ -3,38 +3,43 @@ package com.redbookclone.app.data.repository
 import com.redbookclone.app.data.local.UserDao
 import com.redbookclone.app.data.local.UserPreferences
 import com.redbookclone.app.data.model.User
+import com.redbookclone.app.data.remote.ApiService
+import com.redbookclone.app.data.remote.dto.LoginRequest
+import com.redbookclone.app.data.remote.dto.RegisterRequest
+import com.redbookclone.app.data.remote.toUser
 import kotlinx.coroutines.flow.first
-import java.util.UUID
 import javax.inject.Inject
 import javax.inject.Singleton
 
 @Singleton
 class AuthRepository @Inject constructor(
+    private val apiService: ApiService,
     private val userDao: UserDao,
     private val userPreferences: UserPreferences
 ) {
     
     suspend fun login(email: String, password: String): Result<User> {
         return try {
-            // 模拟登录逻辑
-            val userId = UUID.randomUUID().toString()
-            val user = User(
-                id = userId,
-                username = email.substringBefore("@"),
-                email = email,
-                avatar = "https://picsum.photos/200?random=$userId",
-                bio = "这是我的个人简介"
-            )
+            val response = apiService.login(LoginRequest(email, password))
             
-            userDao.insertUser(user)
-            userPreferences.saveUserData(
-                userId = user.id,
-                username = user.username,
-                email = user.email,
-                token = "mock_token_$userId"
-            )
-            
-            Result.success(user)
+            if (response.isSuccessful && response.body()?.success == true) {
+                val authData = response.body()!!.data!!
+                val user = authData.user.toUser()
+                
+                // Save user data
+                userDao.insertUser(user)
+                userPreferences.saveUserData(
+                    userId = user.id,
+                    username = user.username,
+                    email = user.email,
+                    token = authData.token
+                )
+                
+                Result.success(user)
+            } else {
+                val errorMessage = response.body()?.message ?: "登录失败"
+                Result.failure(Exception(errorMessage))
+            }
         } catch (e: Exception) {
             Result.failure(e)
         }
@@ -42,24 +47,26 @@ class AuthRepository @Inject constructor(
 
     suspend fun register(username: String, email: String, password: String): Result<User> {
         return try {
-            val userId = UUID.randomUUID().toString()
-            val user = User(
-                id = userId,
-                username = username,
-                email = email,
-                avatar = "https://picsum.photos/200?random=$userId",
-                bio = "新用户"
-            )
+            val response = apiService.register(RegisterRequest(username, email, password))
             
-            userDao.insertUser(user)
-            userPreferences.saveUserData(
-                userId = user.id,
-                username = user.username,
-                email = user.email,
-                token = "mock_token_$userId"
-            )
-            
-            Result.success(user)
+            if (response.isSuccessful && response.body()?.success == true) {
+                val authData = response.body()!!.data!!
+                val user = authData.user.toUser()
+                
+                // Save user data
+                userDao.insertUser(user)
+                userPreferences.saveUserData(
+                    userId = user.id,
+                    username = user.username,
+                    email = user.email,
+                    token = authData.token
+                )
+                
+                Result.success(user)
+            } else {
+                val errorMessage = response.body()?.message ?: "注册失败"
+                Result.failure(Exception(errorMessage))
+            }
         } catch (e: Exception) {
             Result.failure(e)
         }
@@ -67,14 +74,27 @@ class AuthRepository @Inject constructor(
 
     suspend fun logout() {
         userPreferences.clearUserData()
+        userDao.deleteAllUsers()
     }
 
     suspend fun getCurrentUser(): User? {
-        val userId = userPreferences.userId.first()
-        return userId?.let { userDao.getUserById(it).first() }
+        return try {
+            val response = apiService.getCurrentUser()
+            if (response.isSuccessful && response.body()?.success == true) {
+                val user = response.body()!!.data!!.toUser()
+                userDao.insertUser(user)
+                user
+            } else {
+                val userId = userPreferences.userId.first()
+                userId?.let { userDao.getUserById(it).first() }
+            }
+        } catch (e: Exception) {
+            val userId = userPreferences.userId.first()
+            userId?.let { userDao.getUserById(it).first() }
+        }
     }
 
     suspend fun isLoggedIn(): Boolean {
-        return userPreferences.userId.first() != null
+        return userPreferences.token.first() != null
     }
 }

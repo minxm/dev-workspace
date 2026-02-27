@@ -27,21 +27,12 @@ class NoteViewModel @Inject constructor(
 
     init {
         loadNotes()
-        initializeMockData()
     }
 
     private fun loadNotes() {
         viewModelScope.launch {
             noteRepository.getAllNotes().collect { notesList ->
                 _notes.value = notesList
-            }
-        }
-    }
-
-    private fun initializeMockData() {
-        viewModelScope.launch {
-            if (_notes.value.isEmpty()) {
-                noteRepository.initializeMockData()
             }
         }
     }
@@ -57,14 +48,15 @@ class NoteViewModel @Inject constructor(
     fun createNote(
         title: String,
         content: String,
-        images: List<String>,
+        imageUris: List<android.net.Uri>,
         location: String = "",
         topics: List<String> = emptyList()
     ) {
         viewModelScope.launch {
             _publishState.value = PublishState.Loading
-            val result = noteRepository.createNote(title, content, images, location, topics)
+            val result = noteRepository.createNote(title, content, imageUris, location, topics)
             _publishState.value = if (result.isSuccess) {
+                loadNotes()
                 PublishState.Success
             } else {
                 PublishState.Error(result.exceptionOrNull()?.message ?: "发布失败")

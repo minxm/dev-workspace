@@ -12,6 +12,9 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
+import android.net.Uri
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -40,8 +43,16 @@ fun PublishScreen(
     var title by remember { mutableStateOf("") }
     var content by remember { mutableStateOf("") }
     var location by remember { mutableStateOf("") }
-    var selectedImages by remember { mutableStateOf<List<String>>(emptyList()) }
+    var selectedImages by remember { mutableStateOf<List<Uri>>(emptyList()) }
     var showLocationDialog by remember { mutableStateOf(false) }
+
+    val imagePickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.GetMultipleContents()
+    ) { uris: List<Uri> ->
+        if (uris.isNotEmpty() && selectedImages.size + uris.size <= 9) {
+            selectedImages = selectedImages + uris
+        }
+    }
     
     val publishState by viewModel.publishState.collectAsState()
 
@@ -126,9 +137,7 @@ fun PublishScreen(
                                 .clip(RoundedCornerShape(8.dp))
                                 .border(1.dp, Gray200, RoundedCornerShape(8.dp))
                                 .clickable {
-                                    // 模拟添加图片
-                                    val newImageUrl = "https://picsum.photos/400/600?random=${System.currentTimeMillis()}"
-                                    selectedImages = selectedImages + newImageUrl
+                                    imagePickerLauncher.launch("image/*")
                                 },
                             contentAlignment = Alignment.Center
                         ) {
@@ -152,12 +161,12 @@ fun PublishScreen(
                 }
 
                 // Selected images
-                items(selectedImages) { imageUrl ->
+                items(selectedImages) { imageUri ->
                     Box(
                         modifier = Modifier.size(100.dp)
                     ) {
                         AsyncImage(
-                            model = imageUrl,
+                            model = imageUri,
                             contentDescription = null,
                             modifier = Modifier
                                 .fillMaxSize()
@@ -167,7 +176,7 @@ fun PublishScreen(
 
                         IconButton(
                             onClick = {
-                                selectedImages = selectedImages.filter { it != imageUrl }
+                                selectedImages = selectedImages.filter { it != imageUri }
                             },
                             modifier = Modifier
                                 .align(Alignment.TopEnd)

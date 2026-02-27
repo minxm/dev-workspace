@@ -1,56 +1,79 @@
 package com.redbookclone.app.data.repository
 
 import com.redbookclone.app.data.local.CommentDao
-import com.redbookclone.app.data.local.UserPreferences
 import com.redbookclone.app.data.model.Comment
+import com.redbookclone.app.data.remote.ApiService
+import com.redbookclone.app.data.remote.dto.CommentRequest
+import com.redbookclone.app.data.remote.toComment
 import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.first
-import java.util.UUID
+import kotlinx.coroutines.flow.flow
 import javax.inject.Inject
 import javax.inject.Singleton
 
 @Singleton
 class CommentRepository @Inject constructor(
-    private val commentDao: CommentDao,
-    private val userPreferences: UserPreferences
+    private val apiService: ApiService,
+    private val commentDao: CommentDao
 ) {
     
-    fun getCommentsByNoteId(noteId: String): Flow<List<Comment>> = 
-        commentDao.getCommentsByNoteId(noteId)
+    fun getCommentsByNoteId(noteId: String): Flow<List<Comment>> = flow {
+        try {
+            val response = apiService.getComments(noteId)
+            if (response.isSuccessful && response.body()?.success == true) {
+                val comments = response.body()!!.data!!.map { it.toComment() }
+                commentDao.deleteAllComments()
+                commentDao.insertComments(comments)
+                emit(comments)
+            } else {
+                emit(commentDao.getCommentsByNoteId(noteId).kotlinx.coroutines.flow.first())
+            }
+        } catch (e: Exception) {
+            emit(commentDao.getCommentsByNoteId(noteId).kotlinx.coroutines.flow.first())
+        }
+    }
 
     suspend fun addComment(noteId: String, content: String): Result<Comment> {
         return try {
-            val userId = userPreferences.userId.first() ?: throw IllegalStateException("用户未登录")
-            val username = userPreferences.username.first() ?: "未知用户"
+            val response = apiService.createComment(noteId, CommentRequest(content))
             
-            val comment = Comment(
-                id = UUID.randomUUID().toString(),
-                noteId = noteId,
-                userId = userId,
-                username = username,
-                userAvatar = "https://picsum.photos/200?random=$userId",
-                content = content
-            )
-            
-            commentDao.insertComment(comment)
-            Result.success(comment)
+            if (response.isSuccessful && response.body()?.success == true) {
+                val comment = response.body()!!.data!!.toComment()
+                commentDao.insertComment(comment)
+                Result.success(comment)
+            } else {
+                Result.failure(Exception(response.body()?.message ?: "评论失败"))
+            }
         } catch (e: Exception) {
             Result.failure(e)
         }
     }
 
     suspend fun likeComment(commentId: String, noteId: String) {
-        val comments = commentDao.getCommentsByNoteId(noteId).first()
-        val comment = comments.find { it.id == commentId } ?: return
-        
-        val updatedComment = comment.copy(
-            isLiked = !comment.isLiked,
-            likesCount = if (comment.isLiked) comment.likesCount - 1 else comment.likesCount + 1
-        )
-        commentDao.updateComment(updatedComment)
+        try {
+            val response = apiService.toggleCommentLike(commentId)
+            if (response.isSuccessful) {
+                val comments = commentDao.getCommentsByNoteId(noteId).kotlinx.coroutines.flow.first()
+                val comment = comments.find { it.id == commentId } ?: return
+                val isLiked = response.body()?.data?.isLiked ?: !comment.isLiked
+                val updatedComment = comment.copy(
+                    isLiked = isLiked,
+                    likesCount = if (isLiked) comment.likesCount + 1 else comment.likesCount - 1
+                )
+                commentDao.updateComment(updatedComment)
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
     }
 
     suspend fun deleteComment(commentId: String) {
-        commentDao.deleteComment(commentId)
+        try {
+            val response = apiService.deleteComment(commentId)
+            if (response.isSuccessful) {
+                commentDao.deleteComment(commentId)
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
     }
 }
